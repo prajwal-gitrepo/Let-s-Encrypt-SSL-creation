@@ -1,0 +1,237 @@
+parameters:
+
+  # INPUT PARAMETERS
+  - name: CertificateRenewalThresholdDays
+    type: number
+    default: 30
+
+  - name: environment   
+    type: string
+  - name: 'application' 
+    type: string
+  - name: location
+    type: string
+    default: 'uksouth'
+
+  # CERTIFICATES PARAMETERS
+  - name: Certbot_Email
+    type: string
+    default: "andrea.piscitelli@mydomain.com"
+  - name: dnsZoneName
+    type: string
+    default: "mydomain.com"
+  - name: dnsResourceGroupName
+    type: string
+    default: "rg-dns"
+  - name: customDomain
+    type: string
+  - name: sslCertificateName
+    type: string
+
+  # CONNECTIONS
+  - name: azureDNSServiceConnection
+    type: string
+  - name: azureServiceConnection
+    type: string
+
+  # AZURE PARAMETERS
+  - name: keyVaultName
+    type: string
+
+steps:
+  - task: UsePythonVersion@0
+    displayName: 'Setup Python'
+    inputs:
+      versionSpec: '3.x'
+      addToPath: true
+
+  - task: AzureCLI@2
+    displayName: "Upgrade Azure CLI"
+    inputs:
+      azureSubscription: ${{ parameters.azureDNSServiceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        echo "Updating Azure CLI..."
+        az upgrade --yes
+        echo "Done."
+
+  - task: AzureCLI@2
+    displayName: "Granting Key Vault permissions to the Service Principal"
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      addSpnToEnvironment: true
+      inlineScript: |
+        KEY_VAULT_NAME="${{ parameters.keyVaultName }}"
+        objectId=$( az ad sp show --id $servicePrincipalId --query id -o tsv)
+        echo "##vso[task.setvariable variable=SpId;issecret=true]$objectId"
+
+        # Set the Access Policy in Key Vault
+        az keyvault set-policy --name $KEY_VAULT_NAME --spn $servicePrincipalId --certificate-permissions get create import updatec
+  
+  - task: AzureCLI@2
+    displayName: "Whitelist Current IP"
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      addSpnToEnvironment: true
+      inlineScript: |
+        KEY_VAULT_NAME="${{ parameters.keyVaultName }}"
+        # Get current IP
+        currentIp=$(curl -s https://api.ipify.org)
+
+        # Whitelist current IP in Key Vault
+        az keyvault network-rule add --name $KEY_VAULT_NAME --ip-address $currentIp
+
+  - task: AzureCLI@2
+    displayName: 'Generating new certificate with Certbot and Let''s Encrypt (if needed)'
+    condition: eq(variables.createCertificate, 'true')
+    inputs:
+      azureSubscription: ${{ parameters.azureDNSServiceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Define a writable working directory
+        CERTBOT_DIR="/home/vsts/work/_temp/certbot"
+        mkdir -p $CERTBOT_DIR/{config,work,logs}
+
+        # Create scripts to manage DNS records
+        cat > auth-hook.sh << 'EOF'
+        #!/bin/bash
+
+        # Create the TXT record
+        az network dns record-set txt create \
+          --resource-group ${{ parameters.dnsResourceGroupName }} \
+          --zone-name ${{ parameters.dnsZoneName }} \
+          --name "_acme-challenge.${{ parameters.customDomain }}" \
+          --ttl 60 || true
+
+        # Add the value to the record
+        az network dns record-set txt add-record \
+          --resource-group ${{ parameters.dnsResourceGroupName }} \
+          --zone-name ${{ parameters.dnsZoneName }} \
+          --record-set-name "_acme-challenge.${{ parameters.customDomain }}" \
+          --value "$CERTBOT_VALIDATION" || true
+        
+        # Wait for DNS propagation
+        MAX_RETRY=10
+        INTERVAL=30
+        for i in $(seq 1 $MAX_RETRY); do
+            DNS_VALUE=$(dig +short TXT _acme-challenge.${{ parameters.customDomain }}.${{ parameters.dnsZoneName }} @8.8.8.8 | tr -d '"')
+            if [ "$DNS_VALUE" = "$CERTBOT_VALIDATION" ]; then
+                echo "TXT record successfully verified."
+                break
+            fi
+            echo "Waiting for DNS propagation ($i/$MAX_RETRY)..."
+            sleep $INTERVAL
+            if [ $i -eq $MAX_RETRY ]; then
+                echo "Timeout DNS propagation."
+                exit 1
+            fi
+        done
+        
+        # Verify that the TXT record is correct
+        az network dns record-set txt show \
+          --resource-group ${{ parameters.dnsResourceGroupName }} \
+          --zone-name ${{ parameters.dnsZoneName }} \
+          --name "_acme-challenge.${{ parameters.customDomain }}"
+        EOF
+
+        cat > cleanup-hook.sh << 'EOF'
+        #!/bin/bash
+        az network dns record-set txt delete \
+          --resource-group ${{ parameters.dnsResourceGroupName }} \
+          --zone-name ${{ parameters.dnsZoneName }} \
+          --name "_acme-challenge.${{ parameters.customDomain }}" \
+          --yes || true
+        EOF
+
+        chmod +x auth-hook.sh cleanup-hook.sh
+
+        # Install Certbot in a virtual environment to avoid permission issues
+        python -m venv certbot-env
+        source certbot-env/bin/activate
+        pip install --upgrade pip
+        pip install certbot
+      
+        # Generate the certificate
+        echo "Starting certificate generation..."
+        certbot certonly \
+          --manual \
+          --preferred-challenges dns \
+          --manual-auth-hook "./auth-hook.sh" \
+          --manual-cleanup-hook "./cleanup-hook.sh" \
+          -d ${{ parameters.customDomain }}.${{ parameters.dnsZoneName }} \
+          --agree-tos -n \
+          --email ${{ parameters.Certbot_Email }} \
+          --config-dir $CERTBOT_DIR/config \
+          --work-dir $CERTBOT_DIR/work \
+          --logs-dir $CERTBOT_DIR/logs \
+          -v
+
+        if [ $? -eq 0 ]; then
+          echo "Certbot successfully completed it's job."
+          ls -la $CERTBOT_DIR/config/live/
+          ls -la $CERTBOT_DIR/config/live/${{ parameters.customDomain }}
+          ls -la $CERTBOT_DIR/config/live/${{ parameters.customDomain }}.${{ parameters.dnsZoneName }}
+        else
+          echo "Certbot job failed..."
+          cat $CERTBOT_DIR/logs/letsencrypt.log
+          exit 1
+        fi
+
+  - task: AzureCLI@2
+    displayName: 'Converting certificate from PEM to PFX format'
+    condition: eq(variables.createCertificate, 'true')
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Definisci nuovamente la variabile CERTBOT_DIR
+        CERTBOT_DIR="/home/vsts/work/_temp/certbot"
+        
+        # Converting the certificate
+        openssl pkcs12 -export \
+          -in "$CERTBOT_DIR/config/live/${{ parameters.customDomain }}.${{ parameters.dnsZoneName }}/fullchain.pem" \
+          -inkey "$CERTBOT_DIR/config/live/${{ parameters.customDomain }}.${{ parameters.dnsZoneName }}/privkey.pem" \
+          -out "$CERTBOT_DIR/certificate.pfx" \
+          -password pass:"$CERT_PASSWORD"
+
+        # Check the file
+        ls -la "$CERTBOT_DIR/certificate.pfx"
+    env:
+      CERT_PASSWORD: $(sslCertPassword)  # Secret variable defined in Library
+
+  
+  - task: AzureCLI@2
+    displayName: 'Uploading certificate to Key Vault'
+    condition: eq(variables.createCertificate, 'true')
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        CERTBOT_DIR="/home/vsts/work/_temp/certbot"
+        KEY_VAULT_NAME="${{ parameters.keyVaultName }}"
+        CERT_NAME="${{ parameters.sslCertificateName }}"
+
+        # Upload the certificate in the Key Vault
+        az keyvault certificate import \
+          --vault-name $KEY_VAULT_NAME \
+          --name $CERT_NAME \
+          --file "$CERTBOT_DIR/certificate.pfx" \
+          --password "$CERT_PASSWORD"
+
+        # Get certificate ID
+        CERT_ID=$(az keyvault certificate show \
+          --vault-name $KEY_VAULT_NAME \
+          --name $CERT_NAME \
+          --query id -o tsv)
+        
+        echo "##vso[task.setvariable variable=CERT_ID;issecret=true]$CERT_ID"
+    env:
+      CERT_PASSWORD: $(sslCertPassword)

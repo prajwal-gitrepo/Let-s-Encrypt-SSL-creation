@@ -1,0 +1,71 @@
+# Azure DevOps Pipeline for renewing all  
+# Let's Encrypt certificates using Certbot and Certbot Azure plugin 
+# for DEV, UAT and PROD environments.
+
+name: Certificates Renewal Pipeline
+
+trigger: none
+
+schedules:
+  - cron: "0 0 1,15 * *"  # Run on the 1st and 15th of each month at midnight
+    displayName: Bi-monthly certificate renewal
+    branches:
+      include:
+        - main
+    always: true
+
+
+variables:
+  # General global variables
+  CertificateRenewalThresholdDays: 30
+  vmImageName: 'ubuntu-latest'
+  location: "uksouth"
+  Certbot_Email: "andrea.piscitelli@mydomain.com"
+  dnsZoneName: "mydomain.com"
+  dnsResourceGroupName: "rg-dns"
+  azureDNSServiceConnection: "myProject - ServiceConnection - DNS"
+  sslCertificateName: "myproj-https-certificate"
+
+  # DEV variables
+  devAzureServiceConnection: "myProject Dev"
+
+  devKeyVaultName:  "myproj-kv-dev-uks"
+  devFirstCustomDomain: "api.myproj1.dev"
+  devSecondCustomDomain: "api.myproj2.dev"
+
+stages:
+- stage: RenewCertificatesDev
+  displayName: 'Let''s Encrypt Certificates Generation'
+  jobs:
+  - job: RenewWebAppCertificate
+    displayName: 'Certificates creation'
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+      - template: Templates/certificate-renewal-template.yml
+        parameters:
+          environment: 'dev'
+          application: 'FirstApp'
+          location: $(location)
+          Certbot_Email: $(Certbot_Email)
+          dnsZoneName: $(dnsZoneName)
+          dnsResourceGroupName: $(dnsResourceGroupName)
+          azureDNSServiceConnection: $(azureDNSServiceConnection)
+          sslCertificateName: $(sslCertificateName)
+          azureServiceConnection: $(devAzureServiceConnection)
+          keyVaultName: $(devKeyVaultName)
+          customDomain: $(devFirstCustomDomain)
+
+      - template: Templates/certificate-renewal-template.yml
+        parameters:
+          environment: 'dev'
+          application: 'SecondApp'
+          location: $(location)
+          Certbot_Email: $(Certbot_Email)
+          dnsZoneName: $(dnsZoneName)
+          dnsResourceGroupName: $(dnsResourceGroupName)
+          azureDNSServiceConnection: $(azureDNSServiceConnection)
+          sslCertificateName: $(sslCertificateName)
+          azureServiceConnection: $(devAzureServiceConnection)
+          keyVaultName: $(devKeyVaultName)
+          customDomain: $(devSecondCustomDomain)
