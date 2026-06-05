@@ -16,7 +16,7 @@ parameters:
   # CERTIFICATES PARAMETERS
   - name: Certbot_Email
     type: string
-    default: "andrea.piscitelli@mydomain.com"
+    default: "abc@mydomain.com"
   - name: dnsZoneName
     type: string
     default: "mydomain.com"
