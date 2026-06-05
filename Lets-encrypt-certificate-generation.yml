@@ -20,7 +20,7 @@ variables:
   CertificateRenewalThresholdDays: 30
   vmImageName: 'ubuntu-latest'
   location: "uksouth"
-  Certbot_Email: "andrea.piscitelli@mydomain.com"
+  Certbot_Email: "abc@mydomain.com"
   dnsZoneName: "mydomain.com"
   dnsResourceGroupName: "rg-dns"
   azureDNSServiceConnection: "myProject - ServiceConnection - DNS"
