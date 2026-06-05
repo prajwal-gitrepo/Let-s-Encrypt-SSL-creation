@@ -11,5 +11,8 @@
 - [challenge-types](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge)
 - [Sub-domain-delegtaion-doc](https://www.eff.org/deeplinks/2018/02/technical-deep-dive-securing-automation-acme-dns-challenge-validation)
 
-# Credits
-Andrea Piscitelli
+## Credits
+Special thanks to [Andrea Piscitelli](https://medium.com/@apgalaxy73)
+
+## Design flow
+https://github.com/prajwal-gitrepo/Let-s-Encrypt-SSL-creation/blob/main/Design.png
